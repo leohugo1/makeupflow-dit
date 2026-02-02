@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  mlflow_server:
+    image: ghcr.io/mlflow/mlflow:latest
+    container_name: mlflow_server
+    ports:
+      - "5000:5000"
+    environment:
+      - MLFLOW_ENABLE_PROXY_FIX=true
+    volumes:
+      - ./mlflow_data:/mlflow_data
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --allowed-hosts "*"
+      --backend-store-uri sqlite:////mlflow_data/mlflow.db
+      --default-artifact-root /mlflow_data/artifacts
+
+  train_app:
+    build: .
+    container_name: makeupflow_train
+    depends_on:
+      - mlflow_server
+    entrypoint: python train.py
+    command: --phase ${PHASE:-train_vae}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow_server:5000
+    volumes:
+      - .:/app
+      - ./mlflow_data:/mlflow_data

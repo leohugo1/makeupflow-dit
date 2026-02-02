@@ -127,7 +127,7 @@ def vae_loss(x,x_recon,mu,log_var,loss_fn_vgg):
     perceptual_loss = loss_fn_vgg(x,x_recon).mean()
     kl_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp())
 
-    total= recon_loss + 1.0 * perceptual_loss + 0.00001 * kl_loss
+    total= recon_loss + 2.5 * perceptual_loss + 0.000005 * kl_loss
     return total,recon_loss,perceptual_loss,kl_loss
 
 

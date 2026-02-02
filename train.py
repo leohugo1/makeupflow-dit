@@ -27,17 +27,18 @@ def train_vae(model,dataloader,optmizer,lpips_loss_fn,scaler,device,config,num_e
     batches_per_epoch = len(dataloader)
     batches_to_skip = global_step % batches_per_epoch
     ssim_metric = StructuralSimilarityIndexMeasure(data_range=2.0).to(device)
-    mlflow.set_experiment("VAE_CelebA_HQ_512")
+    mlflow.set_experiment(experiment_name="MakeupFlow-VAE")
 
-    with mlflow.start_run(run_id="af99c61adf5b4b2ca8c8fd976b8a3fa3"):
+    with mlflow.start_run(run_id="8f4f949cfd984deb98ed13ada003b81c"):
 
         mlflow.log_params({
-            "lr":1e-5,
+            "lr":1e-6,
             "batch_size":dataloader.batch_size,
             "latent_ch":4,
             "resolution": "512x512",
             "device": device,
-            "p_weight":1.0
+            "p_weight":2.5,
+            "kl_weight":0.000005
         })
 
         for epoch in range(current_epoch,num_epochs + 1):
@@ -119,47 +120,70 @@ def Train_vit_style(model,dataloader,optmizer,criterion,scaler,device,config,num
     model.to(device)
 
     print(f"Iniciando treino no dispositivo: {device}")
-    for epoch in range(num_epochs):
-        model.train()
-        total_loss = 0
-        pbar = tqdm(enumerate(dataloader),desc=f"Epoch {epoch}/{num_epochs}")
-        for it, batch in pbar:
-            anc = batch['anchor'].to(device)
-            pos = batch['positive'].to(device)
-            neg = batch['negative'].to(device)
+    mlflow.set_experiment(experiment_name="style_vit")
+    with mlflow.start_run(run_name="run 1"):
+        mlflow.log_params({
+            "lr":1e-6,
+            "batch_size":dataloader.batch_size,
+            "resolution": "256x256",
+            "device": device,
+        })
 
-            optmizer.zero_grad()
+        for epoch in range(num_epochs):
+            model.train()
+            total_loss = 0
+            pbar = tqdm(enumerate(dataloader),desc=f"Epoch {epoch}/{num_epochs}")
+            for it, batch in pbar:
+                step = epoch * len(dataloader) + it
+                anc = batch['anchor'].to(device)
+                pos = batch['positive'].to(device)
+                neg = batch['negative'].to(device)
 
-            with torch.amp.autocast(device_type=device,dtype=torch.bfloat16):
-                emb_anc = model(anc)
-                emb_pos = model(pos)
-                emb_neg = model(neg)
+                optmizer.zero_grad()
 
-                loss = criterion(emb_anc,emb_pos,emb_neg)
+                with torch.amp.autocast(device_type=device,dtype=torch.bfloat16):
+                    emb_anc = model(anc)
+                    emb_pos = model(pos)
+                    emb_neg = model(neg)
+
+                    loss = criterion(emb_anc,emb_pos,emb_neg)
+                
             
-            scaler.scale(loss).backward()
+                with torch.no_grad():
+                    d_pos = torch.norm(emb_anc - emb_pos, p=2, dim=1).mean().item()
+                    d_neg = torch.norm(emb_anc - emb_neg, p=2, dim=1).mean().item()
+                    avg_norm = torch.norm(emb_anc, p=2, dim=1).mean().item()
+                mlflow.log_metric("batch_loss", loss.item(), step=step)
+                mlflow.log_metric("distance_positive", d_pos, step=step)
+                mlflow.log_metric("distance_negative", d_neg, step=step)
+                mlflow.log_metric("embedding_norm", avg_norm, step=step)
+                
 
-            scaler.unscale_(optmizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(),max_norm=1.0)
+                scaler.scale(loss).backward()
+                scaler.unscale_(optmizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(),max_norm=1.0)
 
-            scaler.step(optmizer)
-            scaler.update()
-            total_loss += loss.item()
+                scaler.step(optmizer)
+                scaler.update()
+                total_loss += loss.item()
 
-            pbar.set_postfix({
-                "step": it,
-                "loss": f"{total_loss.item():.4f}"
-            })
-            
-        avg_loss = total_loss / len(dataloader)
-        print(f"===> Epoch {epoch+1} Finalizada | Average Loss: {avg_loss:.4f}")
+                pbar.set_postfix({
+                    "loss": f"{loss.item():.4f}",
+                    "d_pos": f"{d_pos:.3f}",
+                    "d_neg": f"{d_neg:.3f}", 
+                    "norm": f"{avg_norm:.2f}"
+                })
+                
+            avg_loss = total_loss / len(dataloader)
+            mlflow.log_metric("epoch_loss", avg_loss, step=epoch)
+            print(f"===> Epoch {epoch+1} Finalizada | Average Loss: {avg_loss:.4f}")
 
-        if (epoch + 1) % 5 == 0:
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict':model.state_dict(),
-                'optimizer_state_dict':optmizer.state_dict(),
-            },f'style_vit_epoch_{epoch+1}.pth')
+            if (epoch + 1) % 5 == 0:
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict':model.state_dict(),
+                    'optimizer_state_dict':optmizer.state_dict(),
+                },f'style_vit_epoch_{epoch+1}.pth')
 
 
 def Train_dit(dit_model, style_model, vae, dataloader, optimizer,scaler,device,num_epochs=50):
@@ -189,7 +213,7 @@ def Train_dit(dit_model, style_model, vae, dataloader, optimizer,scaler,device,n
             t_vis = t.view(batch_size,1,1,1)
 
             noise = torch.randn_like(x_bare)
-            xt = (1,0 - t_vis) * x_bare + t_vis * noise
+            xt = (1.0 - t_vis) * x_bare + t_vis * noise
             target = x_makeup - x_bare
 
             with torch.amp.autocast(device_type=device,dtype=torch.bfloat16):
@@ -211,14 +235,16 @@ def Train_dit(dit_model, style_model, vae, dataloader, optimizer,scaler,device,n
 
 def get_config():
     return {
-        'epoch':7,
-        'step':56000,
-        'lr':1e-5
+        'epoch':10,
+        'step':7000,
+        'lr':1e-6
     }
 
 
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available else "cpu"
+    tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
+    mlflow.set_tracking_uri(tracking_uri)
     os.makedirs("results", exist_ok=True)
     os.makedirs("checkpoints", exist_ok=True)
     parser = argparse.ArgumentParser()

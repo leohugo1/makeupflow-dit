@@ -8,7 +8,7 @@ O projeto utiliza um script unificado (train.py) para gerenciar as três fases c
 
 **Fase 1: Treinamento do VAE** – Otimização da reconstrução facial 512px usando CelebA-HQ com Perceptual Loss (LPIPS).
 
-**Fase 2: Treinamento do StyleVit** – Extração de embeddings de maquiagem via Vision Transformer e Triplet Margin Loss no dataset FFHQ-Makeup.
+**Fase 2: Treinamento do StyleVit** – Extração de embeddings de maquiagem via Vision Transformer e Triplet Margin Loss no dataset FFHQ-Makeup.[FASE ATUAL]
 
 **Fase 3: Treinamento do DiT (Flow Matching)** – Aprendizado da trajetória linear entre o rosto limpo e maquiado.
 
@@ -49,18 +49,42 @@ cd makeupflow-dit
 # Instale as dependências otimizadas
 pip install -r requirements.txt
 ```
-    🏋️ Como Executar
-O treinamento é controlado via argumentos de fase:
+    🚀 Como Executar (Docker)
+O projeto utiliza Docker para garantir que os drivers de GPU (NVIDIA) e o servidor de métricas (MLflow) funcionem perfeitamente em qualquer máquina.
+
+1. Iniciar o Treinamento
+Para iniciar o treino da fase padrão (VAE) e o servidor de métricas, use:
 ```
 Bash
-# Para treinar o VAE (Fase 1)
-python train.py --phase train_vae
-
-# Para treinar o Style Encoder (Fase 2)
-python train.py --phase train_style_vit
-
-# Para treinar o DiT via Flow Matching (Fase 3)
-python train.py --phase train_dit
+docker-compose up
 ```
+2. Alterar a Fase de Treinamento
+O projeto está configurado para ler a fase desejada via variável de ambiente. Você pode alterar entre train_vae, style_vit e train_dit de duas formas:
+
+A. Via Terminal (Sem alterar arquivos)
+* Windows (PowerShell):
+```
+$env:PHASE="style_vit"; docker-compose up
+```
+* Linux/macOS:
+```
+PHASE=style_vit docker-compose up
+```
+B. Via arquivo .env (Recomendado)
+
+Crie um arquivo chamado .env na raiz do projeto e defina a fase:
+```
+PHASE=style_vit
+```
+
+    📊 Monitoramento (MLflow)
+
+Acompanhe as perdas (loss), gradientes e amostras visuais em tempo real:
+
+* Acesse: http://localhost:5000
+
+---
+
     Inferência e Pesos
+
 Os pesos pré-treinados estarão disponíveis no Hugging Face assim que as etapas de treinamento forem concluídas: 🔗 Hugging Face: [MakeupFlow-DiT](https://huggingface.co/leonardohugo134/makeupflow-dit)
