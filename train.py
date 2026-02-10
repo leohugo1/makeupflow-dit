@@ -1,5 +1,4 @@
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
@@ -9,12 +8,13 @@ import mlflow
 import lpips
 from datasets import load_dataset
 import os
+from glob import glob
 import argparse
 from tqdm import tqdm
 from src.models.VAE import VAE,vae_loss
-from src.models.VitStyle import StyleVit
+from src.models.VitStyle import StyleVit,info_nce
 from src.models.Dit import DiT
-from src.utils import generate_makeup,style_transform_hf,dit_transform_hf,vae_transform_hf
+from src.utils import generate_makeup,vae_transform_hf,StyleDataset,validate_style_consistency
 
 def train_vae(model,dataloader,optmizer,lpips_loss_fn,scaler,device,config,num_epochs=50):
     model.train()
@@ -29,7 +29,7 @@ def train_vae(model,dataloader,optmizer,lpips_loss_fn,scaler,device,config,num_e
     ssim_metric = StructuralSimilarityIndexMeasure(data_range=2.0).to(device)
     mlflow.set_experiment(experiment_name="MakeupFlow-VAE")
 
-    with mlflow.start_run(run_id="8f4f949cfd984deb98ed13ada003b81c"):
+    with mlflow.start_run(run_name="8f4f949cfd984deb98ed13ada003b81c"):
 
         mlflow.log_params({
             "lr":1e-6,
@@ -116,74 +116,81 @@ def train_vae(model,dataloader,optmizer,lpips_loss_fn,scaler,device,config,num_e
             avg_loss = total_epoch_loss / len(dataloader)   
 
 
-def Train_vit_style(model,dataloader,optmizer,criterion,scaler,device,config,num_epochs=50):
-    model.to(device)
-
+def Train_vit_style(model,dataloader,optmizer,scaler,device,config,scheduler,num_epochs=300):
     print(f"Iniciando treino no dispositivo: {device}")
+    accumulation_steps = 4
+    current_epoch = config.get('epoch', 1)
     mlflow.set_experiment(experiment_name="style_vit")
-    with mlflow.start_run(run_name="run 1"):
+    with mlflow.start_run(run_id="3590f3881c8a491ebb4a649f8771001f"):
         mlflow.log_params({
-            "lr":1e-6,
-            "batch_size":dataloader.batch_size,
-            "resolution": "256x256",
-            "device": device,
+            "model_type": "StyleVit_From_Scratch",
+            "embed_dim": 384,
+            "batch_size": dataloader.batch_size,
+            "accumulation_steps": 4,
+            "effective_batch_size": dataloader.batch_size * 4,
+            "learning_rate_max": 1e-4,
+            "warmup_epochs": 10,
+            "weight_decay": 0.1,
+            "temperature": 0.1,
+            "negatives_strategy": "cross_identity",
+            "optimizer": "AdamW"
         })
-
-        for epoch in range(num_epochs):
+        temperature = 0.1
+        for epoch in range(current_epoch,num_epochs +1):
             model.train()
+            optimizer.zero_grad()
             total_loss = 0
             pbar = tqdm(enumerate(dataloader),desc=f"Epoch {epoch}/{num_epochs}")
-            for it, batch in pbar:
+            for it, (view1,view2) in pbar:
                 step = epoch * len(dataloader) + it
-                anc = batch['anchor'].to(device)
-                pos = batch['positive'].to(device)
-                neg = batch['negative'].to(device)
+                view1 = view1.to(device)
+                view2 = view2.to(device)
 
-                optmizer.zero_grad()
 
                 with torch.amp.autocast(device_type=device,dtype=torch.bfloat16):
-                    emb_anc = model(anc)
-                    emb_pos = model(pos)
-                    emb_neg = model(neg)
+                    z1 = model(view1)
+                    z2 = model(view2)
 
-                    loss = criterion(emb_anc,emb_pos,emb_neg)
-                
-            
+                    loss = info_nce(z1,z2,temperature)
+                    loss = loss / accumulation_steps
+                scaler.scale(loss).backward()
+                if (it + 1) % accumulation_steps == 0:
+                    scaler.unscale_(optmizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(),max_norm=1.0)
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad()
+
                 with torch.no_grad():
-                    d_pos = torch.norm(emb_anc - emb_pos, p=2, dim=1).mean().item()
-                    d_neg = torch.norm(emb_anc - emb_neg, p=2, dim=1).mean().item()
-                    avg_norm = torch.norm(emb_anc, p=2, dim=1).mean().item()
+                    z1_n = F.normalize(z1, dim=1)
+                    z2_n = F.normalize(z2, dim=1)
+                    
+                    d_pos = torch.norm(z1_n - z2_n, p=2, dim=1).mean().item()
+                    avg_norm = torch.norm(z1, p=2, dim=1).mean().item()
                 mlflow.log_metric("batch_loss", loss.item(), step=step)
                 mlflow.log_metric("distance_positive", d_pos, step=step)
-                mlflow.log_metric("distance_negative", d_neg, step=step)
                 mlflow.log_metric("embedding_norm", avg_norm, step=step)
-                
 
-                scaler.scale(loss).backward()
-                scaler.unscale_(optmizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(),max_norm=1.0)
-
-                scaler.step(optmizer)
-                scaler.update()
                 total_loss += loss.item()
 
                 pbar.set_postfix({
                     "loss": f"{loss.item():.4f}",
                     "d_pos": f"{d_pos:.3f}",
-                    "d_neg": f"{d_neg:.3f}", 
                     "norm": f"{avg_norm:.2f}"
                 })
-                
+            scheduler.step()
             avg_loss = total_loss / len(dataloader)
             mlflow.log_metric("epoch_loss", avg_loss, step=epoch)
-            print(f"===> Epoch {epoch+1} Finalizada | Average Loss: {avg_loss:.4f}")
-
-            if (epoch + 1) % 5 == 0:
+            print(f"===> Epoch {epoch} Finalizada | Average Loss: {avg_loss:.4f}")
+            state_dict = model._orig_mod.state_dict() if hasattr(model, '_orig_mod') else model.state_dict()
+            if (epoch) % 2 == 0:
                 torch.save({
                     'epoch': epoch,
-                    'model_state_dict':model.state_dict(),
+                    'model_state_dict':state_dict,
                     'optimizer_state_dict':optmizer.state_dict(),
-                },f'style_vit_epoch_{epoch+1}.pth')
+                    'scheduler_state_dict':scheduler.state_dict(),
+                    'scaler_state_dict':scaler.state_dict()
+                },f'checkpoints/style_vit_epoch_{epoch}.pth')
 
 
 def Train_dit(dit_model, style_model, vae, dataloader, optimizer,scaler,device,num_epochs=50):
@@ -235,9 +242,9 @@ def Train_dit(dit_model, style_model, vae, dataloader, optimizer,scaler,device,n
 
 def get_config():
     return {
-        'epoch':10,
-        'step':7000,
-        'lr':1e-6
+        'epoch':18,
+        'step':0,
+        'lr':1e-4
     }
 
 
@@ -277,23 +284,43 @@ if __name__ == "__main__":
         train_vae(model,dataloader,optimizer,loss_fn_vgg,scaler,device,config)
     elif args.phase == 'train_style_vit':
         epoch = config.get('epoch')
-        model_filename = f'style_vit_epoch_{epoch}.pth'
-        dataset = load_dataset("cyberagent/FFHQ-Makeup", split="train")
-        dataset.set_transform(style_transform_hf)
-        train_loader = DataLoader(dataset, batch_size=16, shuffle=True, num_workers=4, pin_memory=True)
-        model = StyleVit()
-        
-        scaler = torch.amp.GradScaler(device=device)
-        criterion = nn.TripletMarginLoss(margin=1.0, p=2)
-        optimizer = optim.AdamW(model.parameters(), lr=config.get('lr'), weight_decay=0.05)
+        model_filename = f'checkpoints/style_vit_epoch_{epoch}.pth'
+        dataset = StyleDataset(
+            root_dir="./FFHQ-Makeup/extracted"
+        )
+        train_loader = DataLoader(dataset, batch_size=32, shuffle=True, num_workers=0, pin_memory=True)
 
+        model = StyleVit().to(device)
+        scaler = torch.amp.GradScaler(device=device)
+        optimizer = optim.AdamW(model.parameters(), lr=config.get('lr'), weight_decay=0.1)
+        num_warmup_epochs = 20
+        warmup_scheduler = optim.lr_scheduler.LinearLR(
+            optimizer, start_factor=1e-4, end_factor=1.0, total_iters=num_warmup_epochs
+        )
+        cosine_scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=300 - num_warmup_epochs
+        )
+        scheduler = optim.lr_scheduler.SequentialLR(
+            optimizer, 
+            schedulers=[warmup_scheduler, cosine_scheduler], 
+            milestones=[num_warmup_epochs]
+        )
         if os.path.exists(model_filename):
+            config["epoch"] = config.get('epoch') + 1
             print(f"Carregando checkpoint: {model_filename}")
             checkpoint = torch.load(model_filename)
             model.load_state_dict(checkpoint['model_state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            if optimizer.param_groups[0]['lr'] > 0.01: 
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = 1e-4
+
+            scaler.load_state_dict(checkpoint['scaler_state_dict'])
+            
+ 
         model = torch.compile(model,mode="reduce-overhead")
-        Train_vit_style(model,train_loader,optimizer,criterion,scaler,device,config)
+        Train_vit_style(model,train_loader,optimizer,scaler,device,config,scheduler)
     elif args.phase == 'train_dit':
         vae = VAE().to(device)
         style_vit = StyleVit().to(device)
@@ -304,7 +331,7 @@ if __name__ == "__main__":
         dit = DiT().to(device)
 
         dataset = load_dataset("cyberagent/FFHQ-Makeup", split="train")
-        dataset.set_transform(dit_transform_hf)
+        #dataset.set_transform(dit_transform_hf)
         train_loader = DataLoader(dataset, batch_size=16, shuffle=True, num_workers=4, pin_memory=True)
 
         optimizer = torch.optim.AdamW(dit.parameters(),lr=config.get('lr'),weight_decay=0.01) 

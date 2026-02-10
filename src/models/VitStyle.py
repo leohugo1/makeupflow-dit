@@ -88,7 +88,11 @@ class StyleVit(nn.Module):
         ])
 
         self.norm = nn.LayerNorm(embed_dim)
-        self.style_head = nn.Linear(embed_dim,512)
+        self.style_head = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim),
+            nn.GELU(),
+            nn.Linear(embed_dim, 512)
+        )
 
         nn.init.trunc_normal_(self.style_token,std=.02)
         self.apply(self._init_weights)
@@ -105,7 +109,7 @@ class StyleVit(nn.Module):
         x = self.stem(x)
         H,W = x.shape[2],x.shape[3]
 
-        x = x + self.peg(x)
+        x = x + F.gelu(self.peg(x))
         x = x.flatten(2).transpose(1,2)
 
         style_token = self.style_token.expand(B,-1,-1)
@@ -116,3 +120,22 @@ class StyleVit(nn.Module):
 
         x = self.norm(x)
         return self.style_head(x[:,0])
+    
+
+def info_nce(z1, z2, temperature=0.2):
+    z1 = F.normalize(z1, dim=1)
+    z2 = F.normalize(z2, dim=1)
+
+    B = z1.size(0)
+    z = torch.cat([z1, z2], dim=0) 
+
+    sim = torch.matmul(z, z.T) / temperature
+
+    labels = torch.arange(B, device=z.device)
+    labels = torch.cat([labels + B, labels], dim=0)
+
+    mask = torch.eye(2*B, device=z.device).bool()
+    sim = sim.masked_fill(mask, -1e9)
+
+    return F.cross_entropy(sim, labels)
+

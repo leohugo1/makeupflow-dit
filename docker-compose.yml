@@ -24,7 +24,7 @@ services:
     depends_on:
       - mlflow_server
     entrypoint: python train.py
-    command: --phase ${PHASE:-train_vae}
+    command: --phase train_style_vit
     deploy:
       resources:
         reservations:

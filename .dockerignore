@@ -1,7 +1,8 @@
 
 mlruns/
+mlflow_data/
 mlflow.db
-
+FFHQ-Makeup/
 
 results/
 checkpoints/
