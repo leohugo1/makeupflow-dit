@@ -1,8 +1,10 @@
 
 results/
+FFHQ-Makeup/
+vit_test/
 
-
-checkpoints/*.pth
+checkpoints/
+*.pth
 *.pth
 *.bin
 *.safetensors
