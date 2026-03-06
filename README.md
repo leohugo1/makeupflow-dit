@@ -8,9 +8,9 @@ O projeto utiliza um script unificado (train.py) para gerenciar as três fases c
 
 **Fase 1: Treinamento do VAE** – Otimização da reconstrução facial 512px usando CelebA-HQ com Perceptual Loss (LPIPS).
 
-**Fase 2: Treinamento do StyleVit** – Extração de embeddings de maquiagem via Vision Transformer e Triplet Margin Loss no dataset FFHQ-Makeup.[FASE ATUAL]
+**Fase 2: Treinamento do StyleVit** – Extração de embeddings de maquiagem via Vision Transformer e Triplet Margin Loss no dataset FFHQ-Makeup.
 
-**Fase 3: Treinamento do DiT (Flow Matching)** – Aprendizado da trajetória linear entre o rosto limpo e maquiado.
+**Fase 3: Treinamento do DiT (Flow Matching)** – Aprendizado da trajetória linear entre o rosto limpo e maquiado.[FASE ATUAL]
 
  ---
     🚀 Arquitetura Técnica
