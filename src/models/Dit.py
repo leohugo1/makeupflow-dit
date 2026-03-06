@@ -2,10 +2,7 @@ import torch
 import torch.nn.functional as F
 import torch.nn as nn
 import math
-from tqdm import tqdm
-from torch.utils.data import DataLoader
-from datasets import load_dataset
-from torchvision import transforms,utils
+
 
 class SwiGLUMP(nn.Module):
     def __init__(self, in_features,hidden_features=None,out_features=None,drop=0.):
@@ -44,7 +41,7 @@ class CrossAttention(nn.Module):
         q = q.reshape(B,N,self.num_heads,C//self.num_heads).transpose(1,2)
 
         out = F.scaled_dot_product_attention(q,k,v)
-        out = out.transpose(1,2).reshape(B,C,N)
+        out = out.transpose(1,2).reshape(B, N, C)
 
         return self.to_out(out)
 

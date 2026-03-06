@@ -18,6 +18,7 @@ mlflow.db.shm
 __pycache__/
 .ipynb_checkpoints/
 .DS_Store
-
+makeup_style_labels.json
 venv/
 .env
+.json
