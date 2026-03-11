@@ -3,7 +3,7 @@ mlruns/
 mlflow_data/
 mlflow.db
 FFHQ-Makeup/
-
+vit_test/
 results/
 checkpoints/
 

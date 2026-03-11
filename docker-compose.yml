@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   mlflow_server:
     image: ghcr.io/mlflow/mlflow:latest
@@ -24,7 +22,8 @@ services:
     depends_on:
       - mlflow_server
     entrypoint: python train.py
-    command: --phase train_style_vit
+    command: --phase train_dit
+    shm_size: '8gb'
     deploy:
       resources:
         reservations:

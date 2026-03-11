@@ -4,6 +4,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import utils
 from torchmetrics.image import StructuralSimilarityIndexMeasure
+from bitsandbytes.optim import AdamW8bit
 import mlflow
 import lpips
 from datasets import load_dataset
@@ -243,32 +244,29 @@ def Train_dit(dit_model, style_model, vae, dataloader, optimizer,scaler,schedule
     print(f"Iniciando Treino via Flow Matching na {torch.cuda.get_device_name(0)}...")
     current_epoch = config.get('epoch', 1)
     mlflow.set_experiment(experiment_name="dit_makeup")
-    with mlflow.start_run(run_name="dit_flow_matching"):
+    with mlflow.start_run(run_id="9a1b5ada333745c4b9cdf060dcd9e1a9"):
         mlflow.log_params({
-            "model":          "DiT",
-            "input_size":     512,
-            "patch_size":     2,
-            "hidden_size":    768,
-            "depth":          12,
-            "num_heads":      12,
-            "style_dim":      512,
-            "batch_size":     dataloader.batch_size,
-            "num_epochs":     num_epochs,
-            "flow_matching":  True,
+            "model": "DiT", "input_size": 512, "patch_size": 2,
+            "hidden_size": 768, "depth": 12, "num_heads": 12,
+            "style_dim": 512, "batch_size": dataloader.batch_size,
+            "num_epochs": num_epochs, "flow_matching": True,
+            "optimizer": "AdamW8bit",          
+            "autocast_dtype": "float16",        
+            "gradient_checkpointing": True,
+            "torch_compile": True,
         })
         for epoch in range(current_epoch,num_epochs):
             dit_model.train()
             total_loss = 0.0
             pbar = tqdm(enumerate(dataloader),desc=f"Epoch {epoch}/{num_epochs}")
-
             for it, batch in pbar:
                 step = epoch * len(dataloader) + it
 
-                img_bare = batch["bare_512"].to(device)     
-                img_makeup = batch["makeup_512"].to(device) 
-                img_makeup_style = batch["style_224"].to(device)
+                img_bare = batch["bare_512"].to(device,non_blocking=True)     
+                img_makeup = batch["makeup_512"].to(device,non_blocking=True) 
+                img_makeup_style = batch["style_224"].to(device,non_blocking=True)
 
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
 
                 with torch.no_grad():
                     x_bare = vae.encode(img_bare) * 0.18215
@@ -283,7 +281,7 @@ def Train_dit(dit_model, style_model, vae, dataloader, optimizer,scaler,schedule
                 xt = (1.0 - t_vis) * x_bare + t_vis * x_makeup
                 target = x_makeup - x_bare
 
-                with torch.amp.autocast(device_type=device,dtype=torch.bfloat16):
+                with torch.amp.autocast(device_type=device,dtype=torch.float16):
                     pred = dit_model(xt,t,style_emb)
                     loss = F.mse_loss(pred,target)
                 
@@ -304,11 +302,13 @@ def Train_dit(dit_model, style_model, vae, dataloader, optimizer,scaler,schedule
             mlflow.log_metric("epoch_loss", avg_loss, step=epoch)
             print(f"===> Epoch {epoch} Finalizada | Loss: {avg_loss:.4f}")
 
-            if epoch % 2 == 0:
-                amostra_bare = batch["bare_512"][0:1].to(device)
-                amostra_referencia = batch["style_224"][0:1].to(device)
-                out_path = f"results/preview_epoch_{epoch}.png"
-                generate_makeup(dit_model,style_model,vae,amostra_bare,amostra_referencia,epoch)
+            if epoch % 1 == 0:
+                dit_model.eval()
+                with torch.no_grad():
+                    amostra_bare = batch["bare_512"][0:1].to(device)
+                    amostra_referencia = batch["style_224"][0:1].to(device)
+                    out_path = f"results/preview_epoch_{epoch}.png"
+                    generate_makeup(dit_model,style_model,vae,amostra_bare,amostra_referencia,epoch)
                 mlflow.log_artifact(out_path)
                 state_dict = dit_model._orig_mod.state_dict() if hasattr(dit_model, '_orig_mod') else dit_model.state_dict()
                 torch.save({
@@ -321,13 +321,14 @@ def Train_dit(dit_model, style_model, vae, dataloader, optimizer,scaler,schedule
 
 def get_config():
     return {
-        'epoch':46,
+        'epoch':3,
         'step':0,
     }
 
 
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available else "cpu"
+    torch.set_float32_matmul_precision('high')
     tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
     mlflow.set_tracking_uri(tracking_uri)
     os.makedirs("results", exist_ok=True)
@@ -409,29 +410,35 @@ if __name__ == "__main__":
             
         print(f"LR ViT:     {optimizer.param_groups[0]['lr']}")
         print(f"LR ArcFace: {optimizer.param_groups[1]['lr']}")
-        image_files = glob(os.path.join("./vit_test", "*.jpg")) + \
-              glob(os.path.join("./vit_test", "*.png")) + \
-              glob(os.path.join("./vit_test", "*.jpeg"))
-
-        if not image_files:
-            print("Erro: Nenhuma imagem encontrada na pasta ./vit_test")
-        else:
-            result = validate_style_consistency(model, device, image_files)
-            print(result)
+        
         Train_vit_style(model,arcface,train_loader,optimizer,scaler,device,config,scheduler)
     elif args.phase == 'train_dit':
+        vae_path = f"checkpoints/vae_epoch_10_step_7000.pth"
         vae = VAE().to(device)
-        style_vit = StyleVit().to(device)
+        vae.load_state_dict(torch.load(vae_path,map_location=device,weights_only=True)['model_state_dict'])
         vae.requires_grad_(False)
-        style_vit.requires_grad_(False)
         vae.eval()
+
+        style_vit_path = f'checkpoints/style_vit_epoch_48.pth'
+        style_vit = StyleVit().to(device)
+        style_vit.load_state_dict(torch.load(style_vit_path,map_location=device,weights_only=True)['model_state_dict'])
+        style_vit.requires_grad_(False)
         style_vit.eval()
-        dit = DiT().to(device)
+        style_vit = torch.compile(style_vit, mode="reduce-overhead")
+
+
+        dit = DiT(use_gradient_checkpointing=True).to(device)
+        dit = torch.compile(dit, mode="reduce-overhead")
+        
 
         dataset = DitDataset(root_dir="./FFHQ-Makeup/extracted")
-        train_loader = DataLoader(dataset, batch_size=8, shuffle=True, num_workers=4, pin_memory=True)
+        train_loader = DataLoader(dataset, batch_size=6, shuffle=True, num_workers=4, pin_memory=True,persistent_workers=True,prefetch_factor=4)
 
-        optimizer = torch.optim.AdamW(dit.parameters(),lr=1e-4,weight_decay=0.01) 
+        optimizer = AdamW8bit(
+        dit.parameters(),
+        lr=1e-4,
+        weight_decay=0.01,
+        )
         scaler = torch.amp.GradScaler(device=device)
         warmup_epochs  = 5
         total_epochs   = 150
@@ -453,22 +460,17 @@ if __name__ == "__main__":
             milestones=[warmup_epochs]
         )
 
-        vae_path = f"checkpoints/vae_epoch_10_step_7000.pth"
-        style_vit_path = f'style_vit_epoch_46.pth'
+        
+        
         model_filename = f"checkpoints/Dit_epoch_{config['epoch']}.pth"
-
-        vae_checkpoint = torch.load(vae_path,map_location=device)
-        vae.load_state_dict(vae_checkpoint['model_state_dict'])
-
-        style_vit_checkpoint = torch.load(style_vit_path,map_location=device)
-        style_vit.load_state_dict(style_vit_checkpoint['model_state_dict'])
-
         if os.path.exists(model_filename):
-            checkpoint = torch.load(model_filename,map_location=device)
-            dit.load_state_dict(checkpoint['model_state_dict'])
+            config["epoch"] = config.get('epoch') + 1
+            checkpoint = torch.load(model_filename,map_location=device,weights_only=True)
+            (dit._orig_mod if hasattr(dit, '_orig_mod') else dit).load_state_dict(checkpoint['model_state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             scaler.load_state_dict(checkpoint['scaler_state_dict'])
+
 
         Train_dit(dit,style_vit,vae,train_loader,optimizer,scaler,scheduler,device,config,num_epochs=150)
 

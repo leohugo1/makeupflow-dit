@@ -9,30 +9,35 @@ from pathlib import Path
 import random
 
 @torch.no_grad()
-def generate_makeup(dit_model, style_vit, vae, img_bare, img_reference,epoch, steps=25):
+def generate_makeup(dit_model, style_vit, vae, img_bare, img_reference, epoch, steps=25):
     device = next(dit_model.parameters()).device
-    
+
     style_emb = style_vit.forward_style(img_reference.to(device))
-    
 
     x_bare = vae.encode(img_bare.to(device)) * 0.18215
-
     xt = x_bare.clone()
-    
-    dt = 1.0 / steps 
-    
+
+    dt = 1.0 / steps
+
     for i in range(steps):
-        t_curr = (i / steps) 
-        t_tensor = torch.full((1,), t_curr, device=device)
-        
-       
-        v_pred = dit_model(xt, t_tensor, style_emb)
-        
-      
-        xt = xt + v_pred * dt
-    
+        t_curr  = i / steps
+        t_tensor = torch.full((xt.shape[0],), t_curr, device=device)
+        v_pred  = dit_model(xt, t_tensor, style_emb)
+        xt      = xt + v_pred * dt
+
     out_img = vae.decode(xt / 0.18215)
-    utils.save_image(out_img, f"results/preview_epoch_{epoch}.png")
+
+    mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1, 3, 1, 1)
+    std  = torch.tensor([0.229, 0.224, 0.225], device=device).view(1, 3, 1, 1)
+    ref_vis = (img_reference.to(device) * std + mean).clamp(0, 1)
+
+    ref_vis = F.interpolate(ref_vis, size=(512, 512), mode='bilinear', align_corners=False)
+
+    bare_vis = (img_bare.to(device) * 0.5 + 0.5).clamp(0, 1)
+
+    out_vis = (out_img * 0.5 + 0.5).clamp(0, 1)
+    grid = torch.cat([bare_vis, ref_vis, out_vis], dim=3)  
+    utils.save_image(grid, f"results/preview_epoch_{epoch}.png")
 
 @torch.no_grad()
 def validate_style_consistency(model, device, image_paths):
